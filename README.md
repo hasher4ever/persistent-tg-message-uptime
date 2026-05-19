@@ -19,13 +19,13 @@ See `.env.example`.
 
 | Variable | Required | Notes |
 |---|---|---|
-| `KUMA_URL` | yes | Base URL of your Uptime Kuma. Use `http://uptime-kuma.railway.internal:3001` on Railway to keep traffic internal (zero egress cost). |
-| `STATUS_SLUG` | yes | Slug of the public status page (the part after `/status/` in its URL). |
+| `KUMA_URL` | yes | Base URL of your Uptime Kuma. Use `http://uptime-kuma.railway.internal:3001` on Railway to keep traffic internal (zero egress cost). Comma-list to target multiple Kuma instances (one per target). |
+| `STATUS_SLUG` | yes | Slug of the public status page (the part after `/status/` in its URL). Comma-list for multi-target mode (e.g. `tms360-prod,tms360-stage,tms360-dev`). |
 | `BOT_TOKEN` | yes | Telegram bot token from `@BotFather`. Use the same one already wired into Kuma. |
 | `CHAT_ID` | yes | Same chat ID Kuma uses. For a DM, that's your user ID; for a group, the negative group ID. |
-| `MESSAGE_THREAD_ID` | no | Telegram supergroup topic/thread ID. When set, all bot messages (pinned status + alerts) land in that thread instead of the group's main feed. Find it by right-clicking any message in the target thread → *Copy Message Link* → the URL is `https://t.me/c/{chat}/{thread_id}/{msg_id}`. |
+| `MESSAGE_THREAD_ID` | no | Telegram supergroup topic/thread ID. Comma-list aligned with `STATUS_SLUG` for multi-target mode. Find it via right-click on any thread message → *Copy Message Link* → `https://t.me/c/{chat}/{thread_id}/{msg_id}`. |
 | `POLL_INTERVAL` | no | Seconds between updates. Defaults to `60`. |
-| `TITLE` | no | Header text + alert suffix. Defaults to `Status`. Set per Railway environment (e.g. `Prod`, `Staging`, `Dev`) when multiple instances post to the same chat so messages stay distinguishable. |
+| `TITLE` | no | Header text + alert suffix. Defaults to `Status`. Comma-list aligned with `STATUS_SLUG` for multi-target mode. |
 | `PORT` | no | HTTP port for `/healthz`. Railway sets this automatically. |
 
 ## Run locally
@@ -48,19 +48,32 @@ Then `curl http://localhost:3000/healthz`.
 4. **Settings** → **Networking** → click **Generate Domain** (optional — only needed if you want `/healthz` reachable from outside; Kuma can hit it on the internal hostname either way).
 5. Deploy. Logs should show `status-bot listening on :3000, ticking every 60s` and within `POLL_INTERVAL` seconds a new pinned message appears in your Telegram chat.
 
-## Multiple environments, one chat
+## Multiple environments from one service (multi-target mode)
 
-Two ways to differentiate per-env messages in a shared Telegram chat:
+`KUMA_URL`, `STATUS_SLUG`, `MESSAGE_THREAD_ID`, and `TITLE` all accept **comma-separated lists**, aligned by index. One status-bot service drives N pinned messages — one per target. Bot token and chat id stay singletons (Telegram side is shared).
 
-**Option A — flat chat, label-only.** Run multiple status-bot instances against the same Kuma + same `CHAT_ID`, each with a distinct `TITLE` (`Prod` / `Staging` / `Dev`). Headers + alerts get the title appended; all messages land in the chat's main feed.
+If all targets live on a single Kuma, pass `KUMA_URL` as a scalar — it auto-fills for every target. If they live on separate Kumas (one per env), pass all N URLs.
 
-**Option B — supergroup topics/threads (recommended).** If the chat is a supergroup with topics enabled, give each env its own thread. Each instance sets:
-- `TITLE` — the env label
-- `STATUS_SLUG` — the Kuma status page for that env (one page per env, populated by env-tag)
-- `MESSAGE_THREAD_ID` — the thread/topic ID for that env
-- `STATE_FILE` — a unique path per instance (e.g. `/data/state-prod.json`) so each instance tracks its own pinned message
+Example for 3 supergroup topics on the same Kuma:
+```
+KUMA_URL          = http://uptime-service.railway.internal:8080
+BOT_TOKEN         = <single token>
+CHAT_ID           = -1003802594710
+STATUS_SLUG       = tms360-prod,tms360-stage,tms360-dev
+MESSAGE_THREAD_ID = 356,354,352
+TITLE             = Prod,Staging,Dev
+POLL_INTERVAL     = 60
+STATE_FILE        = /data/state.json   (optional; single JSON keyed by slug)
+```
 
-Three instances → three pinned messages, one per thread. The General thread stays bot-free for human discussion.
+Each tick iterates every target sequentially:
+- pulls that target's status page from Kuma
+- edits its pinned message (or creates one on first run)
+- fires DOWN/UP transition alerts into that target's thread
+
+Adding a 4th environment is just appending to each list. The General thread stays bot-free for human discussion.
+
+For a single env, just leave the vars as plain scalars (no commas).
 
 ## Telegram permissions
 

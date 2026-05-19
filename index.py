@@ -6,53 +6,94 @@ import time
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-KUMA_URL           = os.environ.get("KUMA_URL", "").rstrip("/")
-STATUS_SLUG        = os.environ.get("STATUS_SLUG", "")
-BOT_TOKEN          = os.environ.get("BOT_TOKEN", "")
-CHAT_ID            = os.environ.get("CHAT_ID", "")
-MESSAGE_THREAD_ID  = os.environ.get("MESSAGE_THREAD_ID", "").strip()
-POLL_INTERVAL      = int(os.environ.get("POLL_INTERVAL", "60"))
-TITLE              = os.environ.get("TITLE", "Status")
-PORT               = int(os.environ.get("PORT", "3000"))
-STATE_FILE         = os.environ.get("STATE_FILE", "")
-BAR_LEN            = int(os.environ.get("BAR_LEN", "14"))
+# Singletons shared across all targets
+BOT_TOKEN     = os.environ.get("BOT_TOKEN", "")
+CHAT_ID       = os.environ.get("CHAT_ID", "")
+POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "60"))
+PORT          = int(os.environ.get("PORT", "3000"))
+STATE_FILE    = os.environ.get("STATE_FILE", "")
+BAR_LEN       = int(os.environ.get("BAR_LEN", "14"))
+
+# Comma-lists aligned by index. Pass a single value if all targets share it
+# (e.g. one Kuma serving 3 status pages → KUMA_URL stays a scalar, STATUS_SLUG
+# is a 3-item list); pass full lists for fully-separate Kuma instances.
+KUMA_URLS    = [s.strip().rstrip("/") for s in os.environ.get("KUMA_URL", "").split(",") if s.strip()]
+STATUS_SLUGS = [s.strip() for s in os.environ.get("STATUS_SLUG", "").split(",") if s.strip()]
+THREAD_IDS   = [s.strip() for s in os.environ.get("MESSAGE_THREAD_ID", "").split(",")]
+TITLES       = [s.strip() for s in os.environ.get("TITLE", "Status").split(",")]
+
+# Auto-pad shorter lists: KUMA_URL repeats the first value, others use sensible defaults
+def _pad(lst, target_len, fill):
+    while len(lst) < target_len:
+        lst.append(fill)
+n = len(STATUS_SLUGS)
+if KUMA_URLS:
+    _pad(KUMA_URLS, n, KUMA_URLS[0])
+_pad(THREAD_IDS, n, "")
+_pad(TITLES, n, "Status")
 
 BEAT_GLYPH = {1: "🟢", 0: "🔴", 2: "🟡", 3: "🔵"}
 BEAT_BLANK = "⚪"
-NBSP = " "
+NBSP = " "
 
-for k, v in (("KUMA_URL", KUMA_URL), ("STATUS_SLUG", STATUS_SLUG),
-             ("BOT_TOKEN", BOT_TOKEN), ("CHAT_ID", CHAT_ID)):
+for k, v in (("BOT_TOKEN", BOT_TOKEN), ("CHAT_ID", CHAT_ID)):
     if not v:
         print(f"[fatal] missing env var: {k}", file=sys.stderr, flush=True)
         sys.exit(1)
+if not STATUS_SLUGS:
+    print("[fatal] STATUS_SLUG required (comma-separated for multiple targets)",
+          file=sys.stderr, flush=True)
+    sys.exit(1)
+if not KUMA_URLS:
+    print("[fatal] KUMA_URL required (single value or comma-list aligned with STATUS_SLUG)",
+          file=sys.stderr, flush=True)
+    sys.exit(1)
 
-state_lock = threading.Lock()
-last_tick = {"at": 0, "ok": False, "action": None, "error": None}
-message_id: int | None = None
-last_states: dict[str, int | None] = {}
-pending_alerts: list[tuple[int, float]] = []
+
+class Target:
+    """One Kuma status page → one Telegram chat/thread pairing."""
+
+    def __init__(self, kuma_url, slug, thread_id, title):
+        self.kuma_url = kuma_url
+        self.slug = slug
+        self.thread_id = thread_id
+        self.title = title
+        self.message_id = None
+        self.last_states = {}
+        self.pending_alerts = []
+        self.last_tick = {"at": 0, "ok": False, "action": None, "error": None}
+        self.lock = threading.Lock()
+
+    @property
+    def tag(self):
+        return self.title or self.slug
 
 
-def load_message_id():
+TARGETS = [
+    Target(k, s, t, ti)
+    for k, s, t, ti in zip(KUMA_URLS, STATUS_SLUGS, THREAD_IDS, TITLES)
+]
+
+
+def load_all_state():
     if not STATE_FILE:
-        return None
+        return {}
     try:
         with open(STATE_FILE) as f:
-            return json.load(f).get("message_id")
+            return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
-        return None
+        return {}
 
 
-def save_message_id(mid):
+def save_all_state(d):
     if not STATE_FILE:
         return
     try:
-        d = os.path.dirname(STATE_FILE)
-        if d:
-            os.makedirs(d, exist_ok=True)
+        parent = os.path.dirname(STATE_FILE)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
         with open(STATE_FILE, "w") as f:
-            json.dump({"message_id": mid}, f)
+            json.dump(d, f)
     except OSError as e:
         print(f"[warn] cannot persist state: {e}", file=sys.stderr, flush=True)
 
@@ -76,9 +117,16 @@ def tg(method, **params):
     return j
 
 
-def fetch_state():
-    page = http_get_json(f"{KUMA_URL}/api/status-page/{STATUS_SLUG}")
-    beat = http_get_json(f"{KUMA_URL}/api/status-page/heartbeat/{STATUS_SLUG}")
+def _send_kwargs(target, text, **extra):
+    kw = {"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown", **extra}
+    if target.thread_id:
+        kw["message_thread_id"] = int(target.thread_id)
+    return kw
+
+
+def fetch_state(kuma_url, slug):
+    page = http_get_json(f"{kuma_url}/api/status-page/{slug}")
+    beat = http_get_json(f"{kuma_url}/api/status-page/heartbeat/{slug}")
     out = []
     for group in page.get("publicGroupList", []):
         for m in group.get("monitorList", []):
@@ -108,7 +156,6 @@ def is_flaky(m):
 
 def sort_key(m):
     s = m["status"]
-    # down → pending/unknown → flaky → clean up
     if s == 0:
         return (0, m["name"])
     if s != 1:
@@ -118,7 +165,7 @@ def sort_key(m):
     return (3, m["name"])
 
 
-def render(monitors):
+def render(monitors, title):
     down = [m for m in monitors if m["status"] == 0]
     pending = [m for m in monitors if m["status"] in (None, 2)]
     flaky = [m for m in monitors if is_flaky(m)]
@@ -129,17 +176,17 @@ def render(monitors):
     if down:
         names = ", ".join(m["name"] for m in down[:2])
         more = f" +{len(down) - 2}" if len(down) > 2 else ""
-        header = f"🔴 DOWN · *{names}*{more} · {TITLE} · {stamp} UTC"
+        header = f"🔴 DOWN · *{names}*{more} · {title} · {stamp} UTC"
     elif pending:
         names = ", ".join(m["name"] for m in pending[:2])
         more = f" +{len(pending) - 2}" if len(pending) > 2 else ""
-        header = f"🟡 PEND · *{names}*{more} · {TITLE} · {stamp} UTC"
+        header = f"🟡 PEND · *{names}*{more} · {title} · {stamp} UTC"
     elif flaky:
         names = ", ".join(m["name"] for m in flaky[:2])
         more = f" +{len(flaky) - 2}" if len(flaky) > 2 else ""
-        header = f"🟡 FLAKY · *{names}*{more} · {TITLE} · {stamp} UTC"
+        header = f"🟡 FLAKY · *{names}*{more} · {title} · {stamp} UTC"
     else:
-        header = f"🟢 *{TITLE}* · {up_count}/{total} up · {stamp} UTC"
+        header = f"🟢 *{title}* · {up_count}/{total} up · {stamp} UTC"
 
     lines = [header, "─────────────────────"]
     if not monitors:
@@ -156,7 +203,6 @@ def render(monitors):
 
 
 def detect_transitions(monitors, previous):
-    """Return (newly_down, newly_up) lists of service names."""
     newly_down, newly_up = [], []
     for m in monitors:
         prev = previous.get(m["name"])
@@ -175,73 +221,65 @@ def delete_message(mid):
         pass
 
 
-def cleanup_expired_alerts():
-    """Delete every prior alert so only the main status message remains."""
-    global pending_alerts
-    for mid, _ in pending_alerts:
+def cleanup_expired_alerts(target):
+    for mid, _ in target.pending_alerts:
         delete_message(mid)
-    pending_alerts = []
+    target.pending_alerts = []
 
 
-def _send_kwargs(text, **extra):
-    kw = {"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown", **extra}
-    if MESSAGE_THREAD_ID:
-        kw["message_thread_id"] = int(MESSAGE_THREAD_ID)
-    return kw
-
-
-def send_alert(text):
-    """Loud, audible message — for state transitions. Auto-deleted after ALERT_TTL."""
+def send_alert(target, text):
     try:
-        r = tg("sendMessage", **_send_kwargs(text))
-        pending_alerts.append((r["result"]["message_id"], time.time()))
+        r = tg("sendMessage", **_send_kwargs(target, text))
+        target.pending_alerts.append((r["result"]["message_id"], time.time()))
     except Exception as e:
-        print(f"[alert] {e}", file=sys.stderr, flush=True)
+        print(f"[alert·{target.tag}] {e}", file=sys.stderr, flush=True)
 
 
-def do_tick():
-    global last_tick, message_id, last_states
-    cleanup_expired_alerts()
+def do_tick(target):
+    cleanup_expired_alerts(target)
     try:
-        monitors = fetch_state()
-        text = render(monitors)
+        monitors = fetch_state(target.kuma_url, target.slug)
+        text = render(monitors, target.title)
 
-        if last_states:
-            newly_down, newly_up = detect_transitions(monitors, last_states)
+        if target.last_states:
+            newly_down, newly_up = detect_transitions(monitors, target.last_states)
             for name in newly_down:
-                send_alert(f"🔴 DOWN · *{name}* · {TITLE}")
+                send_alert(target, f"🔴 DOWN · *{name}* · {target.title}")
             for name in newly_up:
-                send_alert(f"🟢 UP · *{name}* recovered · {TITLE}")
+                send_alert(target, f"🟢 UP · *{name}* recovered · {target.title}")
+        target.last_states = {m["name"]: m["status"] for m in monitors}
 
-        last_states = {m["name"]: m["status"] for m in monitors}
-
-        if message_id is not None:
+        if target.message_id is not None:
             try:
                 tg("editMessageText",
-                   chat_id=CHAT_ID, message_id=message_id,
+                   chat_id=CHAT_ID, message_id=target.message_id,
                    text=text, parse_mode="Markdown")
-                with state_lock:
-                    last_tick = {"at": int(time.time() * 1000), "ok": True,
-                                 "action": "edited", "error": None}
+                with target.lock:
+                    target.last_tick = {"at": int(time.time() * 1000), "ok": True,
+                                        "action": "edited", "error": None}
                 return
             except Exception:
                 pass
-        r = tg("sendMessage", **_send_kwargs(text, disable_notification=True))
-        message_id = r["result"]["message_id"]
-        save_message_id(message_id)
-        with state_lock:
-            last_tick = {"at": int(time.time() * 1000), "ok": True,
-                         "action": "created", "error": None}
+
+        r = tg("sendMessage", **_send_kwargs(target, text, disable_notification=True))
+        target.message_id = r["result"]["message_id"]
+        state = load_all_state()
+        state[target.slug] = {"message_id": target.message_id}
+        save_all_state(state)
+        with target.lock:
+            target.last_tick = {"at": int(time.time() * 1000), "ok": True,
+                                "action": "created", "error": None}
     except Exception as e:
-        with state_lock:
-            last_tick = {"at": int(time.time() * 1000), "ok": False,
-                         "action": None, "error": str(e)}
-        print(f"[tick] {e}", file=sys.stderr, flush=True)
+        with target.lock:
+            target.last_tick = {"at": int(time.time() * 1000), "ok": False,
+                                "action": None, "error": str(e)}
+        print(f"[tick·{target.tag}] {e}", file=sys.stderr, flush=True)
 
 
 def tick_loop():
     while True:
-        do_tick()
+        for t in TARGETS:
+            do_tick(t)
         time.sleep(POLL_INTERVAL)
 
 
@@ -263,39 +301,52 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/":
             self._respond(200, "status-bot running")
         elif path == "/healthz":
-            with state_lock:
-                snap = dict(last_tick)
-            stale = (time.time() * 1000 - snap["at"]) > POLL_INTERVAL * 1000 * 3
-            healthy = snap["ok"] and not stale
+            now_ms = time.time() * 1000
+            per_target = {}
+            any_unhealthy = False
+            for t in TARGETS:
+                with t.lock:
+                    snap = dict(t.last_tick)
+                stale = (now_ms - snap["at"]) > POLL_INTERVAL * 1000 * 3
+                healthy = snap["ok"] and not stale
+                if not healthy:
+                    any_unhealthy = True
+                per_target[t.slug] = {
+                    "title": t.title,
+                    "healthy": healthy,
+                    "lastTick": snap,
+                    "messageId": t.message_id,
+                }
             body = json.dumps({
-                "status": "ok" if healthy else "degraded",
-                "lastTick": snap,
+                "status": "degraded" if any_unhealthy else "ok",
                 "pollIntervalMs": POLL_INTERVAL * 1000,
-                "messageId": message_id,
+                "targets": per_target,
             })
-            self._respond(200 if healthy else 503, body, "application/json")
+            self._respond(503 if any_unhealthy else 200, body, "application/json")
         else:
             self._respond(404, "not found")
 
     def do_POST(self):
         path = self.path.split("?", 1)[0]
         if path == "/tick":
-            do_tick()
-            with state_lock:
-                snap = dict(last_tick)
+            for t in TARGETS:
+                do_tick(t)
+            snap = {t.slug: t.last_tick for t in TARGETS}
             self._respond(200, json.dumps(snap), "application/json")
         else:
             self._respond(404, "not found")
 
 
 def main():
-    global message_id
-    message_id = load_message_id()
-    if message_id:
-        print(f"loaded message_id={message_id} from {STATE_FILE}", flush=True)
+    state = load_all_state()
+    for t in TARGETS:
+        t.message_id = state.get(t.slug, {}).get("message_id")
+        if t.message_id:
+            print(f"loaded message_id={t.message_id} for {t.tag}", flush=True)
     threading.Thread(target=tick_loop, daemon=True).start()
-    print(f"status-bot listening on :{PORT}, ticking every {POLL_INTERVAL}s",
-          flush=True)
+    titles = ", ".join(t.tag for t in TARGETS)
+    print(f"status-bot listening on :{PORT}, {len(TARGETS)} target(s) [{titles}], "
+          f"ticking every {POLL_INTERVAL}s", flush=True)
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
 
 
