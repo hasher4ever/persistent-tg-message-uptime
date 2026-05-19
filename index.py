@@ -118,10 +118,21 @@ def tg(method, **params):
 
 
 def _send_kwargs(target, text, **extra):
-    kw = {"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown", **extra}
+    # disable_notification=True on every send — Kuma's native notifier
+    # handles DOWN/UP buzzes, so this bot stays a silent pinned-board.
+    kw = {"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown",
+          "disable_notification": True, **extra}
     if target.thread_id:
         kw["message_thread_id"] = int(target.thread_id)
     return kw
+
+
+def clean_name(name):
+    # Strip a leading "[TAG] " prefix — redundant when each thread shows
+    # only one env. Kuma keeps the full name; this is display-only.
+    if name.startswith("[") and "] " in name:
+        return name.split("] ", 1)[1]
+    return name
 
 
 def fetch_state(kuma_url, slug):
@@ -136,7 +147,7 @@ def fetch_state(kuma_url, slug):
             status = history[-1] if history else None
             uptime = beat.get("uptimeList", {}).get(f"{mid}_24", 0) * 100
             out.append({
-                "name": m["name"],
+                "name": clean_name(m["name"]),
                 "status": status,
                 "uptime": uptime,
                 "history": history,
