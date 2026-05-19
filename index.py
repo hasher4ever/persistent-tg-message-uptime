@@ -17,9 +17,8 @@ PORT               = int(os.environ.get("PORT", "3000"))
 STATE_FILE         = os.environ.get("STATE_FILE", "")
 BAR_LEN            = int(os.environ.get("BAR_LEN", "14"))
 
-BEAT_GLYPH = {1: "'", 0: ".", 2: "-", 3: "~"}
-STATUS_EMOJI = {1: "🟢", 0: "🔴", 2: "🟡", 3: "🔵"}
-BEAT_BLANK = " "
+BEAT_GLYPH = {1: "🟢", 0: "🔴", 2: "🟡", 3: "🔵"}
+BEAT_BLANK = "⚪"
 NBSP = " "
 
 for k, v in (("KUMA_URL", KUMA_URL), ("STATUS_SLUG", STATUS_SLUG),
@@ -151,9 +150,8 @@ def render(monitors):
         pct = f"{m['uptime']:5.1f}%"
         if pct.startswith(" "):
             pct = NBSP + pct[1:]
-        dot = STATUS_EMOJI.get(m["status"], "⚪")
         row = f"{pct} {m['name']:<{name_w}} {bar(m['history'])}"
-        lines.append(f"{dot} `{row}`")
+        lines.append(f"`{row}`")
     return "\n".join(lines)
 
 
