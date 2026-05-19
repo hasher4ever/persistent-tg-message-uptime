@@ -201,9 +201,9 @@ def do_tick():
         if last_states:
             newly_down, newly_up = detect_transitions(monitors, last_states)
             for name in newly_down:
-                send_alert(f"DOWN · *{name}*")
+                send_alert(f"🔴 DOWN · *{name}* · {TITLE}")
             for name in newly_up:
-                send_alert(f"UP · *{name}* recovered")
+                send_alert(f"🟢 UP · *{name}* recovered · {TITLE}")
 
         last_states = {m["name"]: m["status"] for m in monitors}
 

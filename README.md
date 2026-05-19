@@ -24,7 +24,7 @@ See `.env.example`.
 | `BOT_TOKEN` | yes | Telegram bot token from `@BotFather`. Use the same one already wired into Kuma. |
 | `CHAT_ID` | yes | Same chat ID Kuma uses. For a DM, that's your user ID; for a group, the negative group ID. |
 | `POLL_INTERVAL` | no | Seconds between updates. Defaults to `60`. |
-| `TITLE` | no | Header text. Defaults to `Status`. |
+| `TITLE` | no | Header text + alert suffix. Defaults to `Status`. Set per Railway environment (e.g. `Prod`, `Staging`, `Dev`) when multiple instances post to the same chat so messages stay distinguishable. |
 | `PORT` | no | HTTP port for `/healthz`. Railway sets this automatically. |
 
 ## Run locally
@@ -46,6 +46,16 @@ Then `curl http://localhost:3000/healthz`.
    - For `KUMA_URL`, open your Kuma service → Networking → copy the `*.railway.internal` hostname → use `http://<that>:3001` (or whichever port Kuma listens on).
 4. **Settings** → **Networking** → click **Generate Domain** (optional — only needed if you want `/healthz` reachable from outside; Kuma can hit it on the internal hostname either way).
 5. Deploy. Logs should show `status-bot listening on :3000, ticking every 60s` and within `POLL_INTERVAL` seconds a new pinned message appears in your Telegram chat.
+
+## Multiple environments, one chat
+
+Running one status-bot per Kuma per Railway environment (prod / staging / dev) and posting to the **same** Telegram chat works fine — each instance maintains its own pinned message via its own `STATE_FILE`. To tell the three apart, set a distinct `TITLE` per environment in Railway → Variables:
+
+- `TITLE=Prod` → header reads `🟢 *Prod* · 12/12 up · …`, alerts read `🔴 DOWN · *foo* · Prod`
+- `TITLE=Staging` → `🟢 *Staging* · …`
+- `TITLE=Dev` → `🟢 *Dev* · …`
+
+No other configuration change is needed.
 
 ## Telegram permissions
 
