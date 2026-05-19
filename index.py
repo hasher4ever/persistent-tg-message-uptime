@@ -35,6 +35,7 @@ _pad(TITLES, n, "Status")
 BEAT_GLYPH = {1: "🟢", 0: "🔴", 2: "🟡", 3: "🔵"}
 BEAT_BLANK = "⚪"
 NBSP = " "
+MAX_NAME = int(os.environ.get("MAX_NAME", "14"))  # ellipsize longer names
 
 for k, v in (("BOT_TOKEN", BOT_TOKEN), ("CHAT_ID", CHAT_ID)):
     if not v:
@@ -131,7 +132,9 @@ def clean_name(name):
     # Strip a leading "[TAG] " prefix — redundant when each thread shows
     # only one env. Kuma keeps the full name; this is display-only.
     if name.startswith("[") and "] " in name:
-        return name.split("] ", 1)[1]
+        name = name.split("] ", 1)[1]
+    if len(name) > MAX_NAME:
+        name = name[:MAX_NAME - 1] + "…"
     return name
 
 
