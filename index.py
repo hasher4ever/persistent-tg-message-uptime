@@ -6,15 +6,16 @@ import time
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-KUMA_URL      = os.environ.get("KUMA_URL", "").rstrip("/")
-STATUS_SLUG   = os.environ.get("STATUS_SLUG", "")
-BOT_TOKEN     = os.environ.get("BOT_TOKEN", "")
-CHAT_ID       = os.environ.get("CHAT_ID", "")
-POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "60"))
-TITLE         = os.environ.get("TITLE", "Status")
-PORT          = int(os.environ.get("PORT", "3000"))
-STATE_FILE    = os.environ.get("STATE_FILE", "")
-BAR_LEN       = int(os.environ.get("BAR_LEN", "14"))
+KUMA_URL           = os.environ.get("KUMA_URL", "").rstrip("/")
+STATUS_SLUG        = os.environ.get("STATUS_SLUG", "")
+BOT_TOKEN          = os.environ.get("BOT_TOKEN", "")
+CHAT_ID            = os.environ.get("CHAT_ID", "")
+MESSAGE_THREAD_ID  = os.environ.get("MESSAGE_THREAD_ID", "").strip()
+POLL_INTERVAL      = int(os.environ.get("POLL_INTERVAL", "60"))
+TITLE              = os.environ.get("TITLE", "Status")
+PORT               = int(os.environ.get("PORT", "3000"))
+STATE_FILE         = os.environ.get("STATE_FILE", "")
+BAR_LEN            = int(os.environ.get("BAR_LEN", "14"))
 
 BEAT_GLYPH = {1: "|", 0: "_", 2: "-", 3: "|"}
 BEAT_BLANK = " "
@@ -182,10 +183,17 @@ def cleanup_expired_alerts():
     pending_alerts = []
 
 
+def _send_kwargs(text, **extra):
+    kw = {"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown", **extra}
+    if MESSAGE_THREAD_ID:
+        kw["message_thread_id"] = int(MESSAGE_THREAD_ID)
+    return kw
+
+
 def send_alert(text):
     """Loud, audible message — for state transitions. Auto-deleted after ALERT_TTL."""
     try:
-        r = tg("sendMessage", chat_id=CHAT_ID, text=text, parse_mode="Markdown")
+        r = tg("sendMessage", **_send_kwargs(text))
         pending_alerts.append((r["result"]["message_id"], time.time()))
     except Exception as e:
         print(f"[alert] {e}", file=sys.stderr, flush=True)
@@ -218,9 +226,7 @@ def do_tick():
                 return
             except Exception:
                 pass
-        r = tg("sendMessage",
-               chat_id=CHAT_ID, text=text, parse_mode="Markdown",
-               disable_notification=True)
+        r = tg("sendMessage", **_send_kwargs(text, disable_notification=True))
         message_id = r["result"]["message_id"]
         save_message_id(message_id)
         with state_lock:

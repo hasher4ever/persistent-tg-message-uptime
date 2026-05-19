@@ -23,6 +23,7 @@ See `.env.example`.
 | `STATUS_SLUG` | yes | Slug of the public status page (the part after `/status/` in its URL). |
 | `BOT_TOKEN` | yes | Telegram bot token from `@BotFather`. Use the same one already wired into Kuma. |
 | `CHAT_ID` | yes | Same chat ID Kuma uses. For a DM, that's your user ID; for a group, the negative group ID. |
+| `MESSAGE_THREAD_ID` | no | Telegram supergroup topic/thread ID. When set, all bot messages (pinned status + alerts) land in that thread instead of the group's main feed. Find it by right-clicking any message in the target thread → *Copy Message Link* → the URL is `https://t.me/c/{chat}/{thread_id}/{msg_id}`. |
 | `POLL_INTERVAL` | no | Seconds between updates. Defaults to `60`. |
 | `TITLE` | no | Header text + alert suffix. Defaults to `Status`. Set per Railway environment (e.g. `Prod`, `Staging`, `Dev`) when multiple instances post to the same chat so messages stay distinguishable. |
 | `PORT` | no | HTTP port for `/healthz`. Railway sets this automatically. |
@@ -49,13 +50,17 @@ Then `curl http://localhost:3000/healthz`.
 
 ## Multiple environments, one chat
 
-Running one status-bot per Kuma per Railway environment (prod / staging / dev) and posting to the **same** Telegram chat works fine — each instance maintains its own pinned message via its own `STATE_FILE`. To tell the three apart, set a distinct `TITLE` per environment in Railway → Variables:
+Two ways to differentiate per-env messages in a shared Telegram chat:
 
-- `TITLE=Prod` → header reads `🟢 *Prod* · 12/12 up · …`, alerts read `🔴 DOWN · *foo* · Prod`
-- `TITLE=Staging` → `🟢 *Staging* · …`
-- `TITLE=Dev` → `🟢 *Dev* · …`
+**Option A — flat chat, label-only.** Run multiple status-bot instances against the same Kuma + same `CHAT_ID`, each with a distinct `TITLE` (`Prod` / `Staging` / `Dev`). Headers + alerts get the title appended; all messages land in the chat's main feed.
 
-No other configuration change is needed.
+**Option B — supergroup topics/threads (recommended).** If the chat is a supergroup with topics enabled, give each env its own thread. Each instance sets:
+- `TITLE` — the env label
+- `STATUS_SLUG` — the Kuma status page for that env (one page per env, populated by env-tag)
+- `MESSAGE_THREAD_ID` — the thread/topic ID for that env
+- `STATE_FILE` — a unique path per instance (e.g. `/data/state-prod.json`) so each instance tracks its own pinned message
+
+Three instances → three pinned messages, one per thread. The General thread stays bot-free for human discussion.
 
 ## Telegram permissions
 
