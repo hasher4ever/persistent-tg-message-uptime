@@ -206,13 +206,14 @@ def render(monitors, title):
     if not monitors:
         lines.append("_no monitors found on status page_")
         return "\n".join(lines)
-    name_w = max(len(m["name"]) for m in monitors)
     for m in sorted(monitors, key=sort_key):
         pct = f"{m['uptime']:5.1f}%"
         if pct.startswith(" "):
             pct = NBSP + pct[1:]
-        row = f"{pct} {m['name']:<{name_w}} {bar(m['history'])}"
-        lines.append(f"`{row}`")
+        # pct stays in mono so the % column stays right-aligned across rows;
+        # name + bar render in proportional font so the row collapses to
+        # natural width and stops wrapping on narrow desktop columns.
+        lines.append(f"`{pct}` {m['name']} {bar(m['history'])}")
     return "\n".join(lines)
 
 
