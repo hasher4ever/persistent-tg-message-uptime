@@ -33,11 +33,14 @@ KUMA_USER = os.environ.get("KUMA_USER")
 KUMA_PASS = os.environ.get("KUMA_PASS")
 
 ENVS = [
-    # env_name (railway),       short, tag_name, color
-    ("production",  "P", "prod",    "#22c55e"),
-    ("staging",     "S", "staging", "#f59e0b"),
-    ("development", "D", "dev",     "#3b82f6"),
+    # env_name (railway),  display_prefix, tag_name, color
+    ("production",  "PROD",    "prod",    "#22c55e"),
+    ("staging",     "STAGING", "staging", "#f59e0b"),
+    ("development", "DEV",     "dev",     "#3b82f6"),
 ]
+
+# Old single-letter prefixes → new full prefix. Used to migrate existing monitors.
+LEGACY_PREFIX_MAP = {"P": "PROD", "S": "STAGING", "D": "DEV"}
 
 SKIP_NAME_PATTERNS = [
     r"^postgres", r"^redis", r"^kafka-production$", r"^ClickHouse",
@@ -112,6 +115,25 @@ def main():
 
         existing_by_name = {m["name"]: m["id"] for m in api.get_monitors()}
         print(f"kuma already has: {len(existing_by_name)} monitors", flush=True)
+
+        # Migration: rename any monitors using legacy single-letter prefixes
+        # (e.g. "[P] accounting" → "[PROD] accounting") in place.
+        renamed = 0
+        for old_name, mid in list(existing_by_name.items()):
+            m = re.match(r"^\[([PSD])\] (.+)$", old_name)
+            if not m:
+                continue
+            new_prefix = LEGACY_PREFIX_MAP[m.group(1)]
+            new_name = f"[{new_prefix}] {m.group(2)}"
+            if new_name == old_name or new_name in existing_by_name:
+                continue
+            api.edit_monitor(mid, name=new_name)
+            existing_by_name[new_name] = mid
+            del existing_by_name[old_name]
+            renamed += 1
+            print(f"  → renamed {old_name} → {new_name}", flush=True)
+        if renamed:
+            print(f"migrated {renamed} legacy prefixes\n", flush=True)
 
         tag_cache: dict[str, int] = {}
         created = skipped = 0
