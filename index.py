@@ -148,7 +148,12 @@ def fetch_state(kuma_url, slug):
             beats = beat.get("heartbeatList", {}).get(mid, [])
             history = [b.get("status") for b in beats[-BAR_LEN:]]
             status = history[-1] if history else None
-            uptime = beat.get("uptimeList", {}).get(f"{mid}_24", 0) * 100
+            # % is computed over the SAME beats the bar visualizes — so it
+            # matches the bubbles the user is looking at. Kuma's
+            # uptimeList[..._24] is a 24h rolling average and contradicted
+            # the bar whenever a long-up service had recently gone down.
+            up_count = sum(1 for s in history if s == 1)
+            uptime = (up_count / len(history)) * 100 if history else 0
             out.append({
                 "name": clean_name(m["name"]),
                 "status": status,
